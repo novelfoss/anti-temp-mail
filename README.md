@@ -1,2 +1,5 @@
-# anti-temp-mail
-Don't let spammers play on your website with temp-mail.
+![Novel](/bg.png)
+
+# Novel, Anti-Temp-Mail
+
+Anti-Temp-Mail is FREE, Open-Sourced simple temp-mail detector.
