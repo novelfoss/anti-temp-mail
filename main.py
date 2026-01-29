@@ -68,6 +68,7 @@ class EmailDetector:
         
         is_managed_routing = len(mx_providers) > 0
         is_major_provider = any(p in str(mx_providers).lower() for p in ScoringConfig.MAJOR_NS_PROVIDERS)
+        is_self_hosted = any(self._is_brand_match(base_domain, mx) for mx in records.mx if mx != '.')
 
         score = 0
         reasons = []
@@ -76,14 +77,14 @@ class EmailDetector:
         score += self._analyze_naming_structure(extracted, reasons)
         
         # 2. DNS Infrastructure Analysis
-        score += self._analyze_infrastructure(records, base_domain, reasons, is_managed_routing)
+        score += self._analyze_infrastructure(records, base_domain, reasons, is_managed_routing, is_self_hosted)
         
         # 3. Security Posture
-        score += self._evaluate_security_posture(records, score, reasons, is_managed_routing)
+        score += self._evaluate_security_posture(records, score, reasons, is_managed_routing, is_self_hosted)
         
         # 4. Managed & Professional Checks
         score += self._analyze_managed_patterns(records, extracted, base_domain, reasons, 
-                                                is_managed_routing, is_major_provider, mx_providers)
+                                                is_managed_routing, is_major_provider, mx_providers, is_self_hosted)
 
         return self._classify(score, reasons)
 
@@ -142,7 +143,7 @@ class EmailDetector:
 
         return score_delta
 
-    def _analyze_infrastructure(self, records: DNSRecords, base_domain: str, reasons: List[str], is_managed_routing: bool) -> int:
+    def _analyze_infrastructure(self, records: DNSRecords, base_domain: str, reasons: List[str], is_managed_routing: bool, is_self_hosted: bool) -> int:
         score_delta = 0
         
         if not records.mx:
@@ -159,7 +160,7 @@ class EmailDetector:
             reasons.append(f"Global IP diversity ({subnet_count} subnets)")
 
         is_major_ns = any(any(p in ns.lower() for p in ScoringConfig.MAJOR_NS_PROVIDERS) for ns in records.ns)
-        if is_major_ns:
+        if is_major_ns and not is_self_hosted:
             score_delta -= 2
             reasons.append("Common NS infrastructure") 
             
@@ -171,6 +172,8 @@ class EmailDetector:
                 break
 
         if any(base_domain in mx for mx in records.mx if mx != '.'):
+            # Already calculated as is_self_hosted, but keep reason text if needed, or rely on is_self_hosted in score.
+            # Increasing penalty slightly for Self-hosted if it's already flagged.
             score_delta += 2
             reasons.append("Self-hosted MX")
 
@@ -188,7 +191,7 @@ class EmailDetector:
 
         return score_delta
 
-    def _evaluate_security_posture(self, records: DNSRecords, current_score: int, reasons: List[str], is_managed_routing: bool) -> int:
+    def _evaluate_security_posture(self, records: DNSRecords, current_score: int, reasons: List[str], is_managed_routing: bool, is_self_hosted: bool) -> int:
         score_delta = 0
         
         has_dmarc, dmarc_policy = self._parse_dmarc(records.dmarc)
@@ -231,8 +234,11 @@ class EmailDetector:
         # Bonuses
         if non_spf_count >= 1:
             bonus = 5 if non_spf_count >= 2 else 2
-            score_delta -= bonus
-            reasons.append(f"Verified domain (Tags: {non_spf_count})")
+            if is_self_hosted: bonus = 0 # Disable bonus for self-hosted to capture advanced temp mail
+            
+            if bonus > 0:
+                score_delta -= bonus
+                reasons.append(f"Verified domain (Tags: {non_spf_count})")
 
         if len(records.txt) > 5:
             score_delta -= 3
@@ -241,7 +247,7 @@ class EmailDetector:
         return score_delta
 
     def _analyze_managed_patterns(self, records: DNSRecords, extracted: Any, base_domain: str, reasons: List[str], 
-                                  is_managed_routing: bool, is_major_provider: bool, mx_providers: Set[str]) -> int:
+                                  is_managed_routing: bool, is_major_provider: bool, mx_providers: Set[str], is_self_hosted: bool) -> int:
         score_delta = 0
         
         is_pseudo_diverse = is_managed_routing and len(mx_providers) == 1 and len(records.mx) > 2 and not is_major_provider
@@ -280,6 +286,7 @@ class EmailDetector:
         # 2. Infrastructure Redundancy
         if len(records.mx) == 1 and len(records.mx_ips) <= 2:
             penalty = 1 if (is_major_ns or non_spf_count >= 1) else 4
+            if is_self_hosted: penalty = 4 # High penalty for self-hosted single MX
             score_delta += penalty
             reasons.append("Single mail host")
 
